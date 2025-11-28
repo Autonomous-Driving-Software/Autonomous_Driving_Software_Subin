@@ -24,12 +24,17 @@
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 
+
+/* interface쓰는법 
+ 이전에 내가 짜둔 코드는 ad_msgs에 정의된 걸 가져와서 썼는데 이거를 다른 프로젝트에서 쓰기 위해서 interface 버전으로 변경하는 것이다. ad_msgs ->interface */
+
+
 // Interface Header
 #include "interface_lane.hpp"
 
 namespace ros2_bridge {
     // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - //
-    // Get functions
+    // Get functions (converting message to data struct)
     // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - //
     inline interface::Lanes GetLanePointsArray(const ad_msgs::msg::LanePointDataArray& msg) {
         interface::Lanes lane_points_array;
@@ -66,9 +71,22 @@ namespace ros2_bridge {
 
         return lane_points;
     }
+    //[다훈 수정]driving_way planning에서 control로 넘겨줄 때 사용하기 위해 
+    inline interface::PolyfitLane GetPolyfitLaneData(const ad_msgs::msg::PolyfitLaneData& msg) {
+        interface::PolyfitLane lane;
+        lane.frame_id = msg.frame_id;
+        lane.id = msg.id;
+
+        lane.a0 = msg.a0;
+        lane.a1 = msg.a1;
+        lane.a2 = msg.a2;
+        lane.a3 = msg.a3;
+
+        return lane;
+    }
     
     // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - //
-    // Update functions
+    // Update functions(converting data struct to message)
     // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - //
     inline ad_msgs::msg::LanePointDataArray UpdateCsvLanes(const interface::Lanes& csv_lanes) {
         ad_msgs::msg::LanePointDataArray msg;

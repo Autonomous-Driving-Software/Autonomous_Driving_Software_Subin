@@ -33,16 +33,12 @@ include_directories(
 )
 
 ## Declare a C++ executable
-add_executable(${PROJECT_NAME}
-    src/autonomous_driving_node.cpp
-)
 
-## Link libraries to the executable
-target_link_libraries(${PROJECT_NAME}
+#1. Perception Node
+add_executable(perception_node
+    src/perception_node.cpp
 )
-
-## Add dependencies to the executable
-ament_target_dependencies(${PROJECT_NAME}
+ament_target_dependencies(perception_node
     rclcpp
     std_msgs
     ad_msgs
@@ -50,9 +46,37 @@ ament_target_dependencies(${PROJECT_NAME}
     tf2_ros
 )
 
-## Install the executable
-install(TARGETS ${PROJECT_NAME}
-    DESTINATION lib/${PROJECT_NAME})
+#2. Planning Node
+add_executable(planning_node
+    src/planning_node.cpp
+)
+ament_target_dependencies(planning_node
+    rclcpp
+    std_msgs
+    ad_msgs
+    tf2
+    tf2_ros
+)
+
+#3. Control Node
+add_executable(control_node
+    src/control_node.cpp
+)
+ament_target_dependencies(control_node
+    rclcpp
+    std_msgs
+    ad_msgs
+    tf2
+    tf2_ros
+)
+
+## Install all three executables
+install(TARGETS 
+    perception_node
+    planning_node
+    control_node
+    DESTINATION lib/${PROJECT_NAME}
+)
 
 install(DIRECTORY launch
     DESTINATION share/${PROJECT_NAME})
@@ -62,7 +86,7 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-################################################################################
+##################################################################
 # Find and load build settings from external packages
-################################################################################
+##################################################################
 ament_package()
