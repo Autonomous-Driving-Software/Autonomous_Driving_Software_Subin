@@ -31,6 +31,7 @@
 // Bridge Header
 #include "ros2_bridge_vehicle.hpp"
 #include "ros2_bridge_lane.hpp"
+#include <visualization_msgs/msg/marker.hpp>
 
 // Algorithm Header
 #include "lane_detection/lane_detection_algorithm.hpp"
@@ -71,6 +72,7 @@ class LaneDetection : public rclcpp::Node {
         rclcpp::Publisher<ad_msgs::msg::LanePointDataArray>::SharedPtr p_csv_lanes_;
         rclcpp::Publisher<ad_msgs::msg::LanePointDataArray>::SharedPtr p_roi_lanes_;
         rclcpp::Publisher<ad_msgs::msg::LanePointData>::SharedPtr p_lane_points_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr p_roi_marker_;
         
         // Timer
         rclcpp::TimerBase::SharedPtr t_run_node_;

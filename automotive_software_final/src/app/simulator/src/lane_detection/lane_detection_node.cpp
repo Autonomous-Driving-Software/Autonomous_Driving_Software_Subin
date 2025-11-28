@@ -54,6 +54,9 @@ LaneDetection::LaneDetection(const std::string& node_name, const rclcpp::NodeOpt
         "ROI_lanes", qos_profile);
     p_lane_points_ = this->create_publisher<ad_msgs::msg::LanePointData>(
         "lane_points", qos_profile);
+    // RViz Marker for ROI
+    p_roi_marker_ = this->create_publisher<visualization_msgs::msg::Marker>(
+        "roi_marker", qos_profile);
 
     // Timer init
     t_run_node_ = this->create_wall_timer(
@@ -111,6 +114,41 @@ void LaneDetection::Run() {
 
     p_roi_lanes_->publish(ros2_bridge::UpdateROILanes(roi_lanes));
     p_lane_points_->publish(ros2_bridge::UpdateLanePoints(shuffled_roi_lane, cfg_.vehicle_namespace));
+
+    // Publish ROI marker for RViz (in vehicle body frame)
+    visualization_msgs::msg::Marker roi_marker;
+    roi_marker.header.stamp = this->now();
+    roi_marker.header.frame_id = cfg_.vehicle_namespace + "/body";
+    roi_marker.ns = "lane_detection";
+    roi_marker.id = 0;
+    roi_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    roi_marker.action = visualization_msgs::msg::Marker::ADD;
+    // rectangle corners in vehicle body frame (z = 0)
+    geometry_msgs::msg::Point p1, p2, p3, p4;
+    // front-left
+    p1.x = cfg_.ROI_front; p1.y = cfg_.ROI_left; p1.z = 0.0;
+    // front-right
+    p2.x = cfg_.ROI_front; p2.y = -cfg_.ROI_right; p2.z = 0.0;
+    // rear-right
+    p3.x = -cfg_.ROI_rear; p3.y = -cfg_.ROI_right; p3.z = 0.0;
+    // rear-left
+    p4.x = -cfg_.ROI_rear; p4.y = cfg_.ROI_left; p4.z = 0.0;
+    roi_marker.points.clear();
+    roi_marker.points.push_back(p1);
+    roi_marker.points.push_back(p2);
+    roi_marker.points.push_back(p3);
+    roi_marker.points.push_back(p4);
+    // close the loop
+    roi_marker.points.push_back(p1);
+
+    roi_marker.scale.x = 0.05; // line width
+    // color: semi-transparent green
+    roi_marker.color.r = 0.0f;
+    roi_marker.color.g = 1.0f;
+    roi_marker.color.b = 0.0f;
+    roi_marker.color.a = 0.8f;
+
+    p_roi_marker_->publish(roi_marker);
 }
 
 int main(int argc, char **argv) {
