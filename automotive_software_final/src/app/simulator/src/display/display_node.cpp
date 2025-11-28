@@ -51,7 +51,7 @@ Display::Display(const std::string& node_name, const rclcpp::NodeOptions& option
     s_poly_lanes_ = this->create_subscription<ad_msgs::msg::PolyfitLaneDataArray> (
         "poly_lanes", qos_profile, std::bind(&Display::CallbackPolyLanes, this, std::placeholders::_1));
     s_driving_way_ = this->create_subscription<ad_msgs::msg::PolyfitLaneData> (
-        "driving_way_real", qos_profile, std::bind(&Display::CallbackDrivingWay, this, std::placeholders::_1));
+        "driving_way", qos_profile, std::bind(&Display::CallbackDrivingWay, this, std::placeholders::_1));
     
     // Publisher init
     p_vehicle_marker_ = this->create_publisher<visualization_msgs::msg::Marker> (
