@@ -96,7 +96,7 @@ class PerceptionNode : public rclcpp::Node {
         // (1)poly lanes publish
         rclcpp::Publisher<ad_msgs::msg::PolyfitLaneDataArray>::SharedPtr p_poly_lanes_;
         // (2)driving_way_raw publish
-        rclcpp::Publisher<ad_msgs::msg::PolyfitLaneData>::SharedPtr p_driving_way_raw_;
+        rclcpp::Publisher<ad_msgs::msg::PolyfitLaneData>::SharedPtr p_driving_way_;
 
         // Timer
         rclcpp::TimerBase::SharedPtr t_run_node_;

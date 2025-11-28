@@ -59,7 +59,7 @@ PlanningNode::PlanningNode(const std::string &node_name, const rclcpp::NodeOptio
 
     //[11.28 다훈 수정] driving_way_raw subscriber 추가
     s_driving_way_raw_ = this->create_subscription<ad_msgs::msg::PolyfitLaneData>(
-        "driving_way_raw", qos_profile, std::bind(&PlanningNode::CallbackPolyfitLaneData, this, std::placeholders::_1));
+        "driving_way", qos_profile, std::bind(&PlanningNode::CallbackPolyfitLaneData, this, std::placeholders::_1));
 
     //======================================================
     //publisher init

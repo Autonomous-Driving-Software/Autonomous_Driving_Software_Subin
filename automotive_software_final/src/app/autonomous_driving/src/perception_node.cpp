@@ -60,9 +60,10 @@ PerceptionNode::PerceptionNode(const std::string &node_name, const rclcpp::NodeO
     //p_vehicle_command_ = 
     //this->create_publisher<ad_msgs::msg::VehicleCommand>(
     //    "vehicle_command", qos_profile);
-    p_driving_way_raw_ = 
+    p_driving_way_= 
     this->create_publisher<ad_msgs::msg::PolyfitLaneData>(
-        "driving_way_raw", qos_profile);
+        "driving_way", qos_profile);
+
     p_poly_lanes_ = 
     this->create_publisher<ad_msgs::msg::PolyfitLaneDataArray>(
         "poly_lanes", qos_profile);
@@ -137,8 +138,7 @@ void PerceptionNode::Run() {
     //===================================================
     interface::PolyfitLanes poly_lanes;
 
-    interface::PolyfitLane driving_way_raw = FindDrivingWay(vehicle_state, lane_points);
-
+    interface::PolyfitLane driving_way = FindDrivingWay(vehicle_state, lane_points);
     //if (cfg_.use_manual_inputs == true) {
     //    vehicle_command = manual_input;
     //}
@@ -149,7 +149,7 @@ void PerceptionNode::Run() {
     // (1) vehicle command
     //p_vehicle_command_->publish(ros2_bridge::UpdateVehicleCommand(vehicle_command));
     // (2) driving way
-    p_driving_way_raw_->publish(ros2_bridge::UpdatePolyfitLane(driving_way_raw));
+    p_driving_way_->publish(ros2_bridge::UpdatePolyfitLane(driving_way));
     // (3) polyfit lanes
     p_poly_lanes_->publish(ros2_bridge::UpdatePolyfitLanes(poly_lanes));
 }
@@ -159,8 +159,8 @@ void PerceptionNode::Run() {
 //===================================================
 interface::PolyfitLane PerceptionNode::FindDrivingWay(const interface::VehicleState &vehicle_state, const interface::Lane& lane_points) {
     
-    interface::PolyfitLane driving_way_raw;
-    driving_way_raw.frame_id = lane_points.frame_id;
+    interface::PolyfitLane driving_way;
+    driving_way.frame_id = lane_points.frame_id;
 
     /**
      * @brief Find the driving way from the lane points
@@ -276,14 +276,13 @@ interface::PolyfitLane PerceptionNode::FindDrivingWay(const interface::VehicleSt
     A_center(2) = (A_left(2) + A_right(2)) / 2;
     A_center(3) = (A_left(3) + A_right(3)) / 2;
     //3-2 driving_way_raw 메시지에 계수 저장 (PolyfitLaneData 메시지에 맞게 (a0~a3) 저장)
-    driving_way_raw.a0 = A_center(0);  // 상수항
-    driving_way_raw.a1 = A_center(1);  // x의 계수
-    driving_way_raw.a2 = A_center(2);  // x²의 계수
-    driving_way_raw.a3 = A_center(3);  // x³의 계수
-
+    driving_way.a0 = A_center(0);  // 상수항
+    driving_way.a1 = A_center(1);  // x의 계수
+    driving_way.a2 = A_center(2);  // x²의 계수
+    driving_way.a3 = A_center(3);  // x³의 계수
     ////////////////////////////////////////////////////
-    return driving_way_raw;
-    }
+    return driving_way;
+}
 
 
 int main(int argc, char **argv) {
