@@ -67,8 +67,10 @@ class PerceptionNode : public rclcpp::Node {
         
         // - algorithm::FindDrivingWay()
         interface::PolyfitLane FindDrivingWay(const interface::VehicleState &vehicle_state, const interface::Lane& lane_points);
-        //////////////////////////////////////////////////
-
+        interface::PolyfitLane FindDrivingWayWithRansac(const interface::VehicleState &vehicle_state, const interface::Lane& lane_points);
+        interface::PolyfitLanes FindLanes(const interface::Lane& lane_points);
+        interface::PolyfitLane FindDrivingWay(const interface::VehicleState &vehicle_state, const interface::PolyfitLanes& lanes);
+        interface::PolyfitLane FindDrivingWayNew(const interface::VehicleState &vehicle_state, const interface::Lane& lane_points);
         //----------------------------------------------------//
         // Variable
 

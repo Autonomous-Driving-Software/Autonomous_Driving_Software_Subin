@@ -3,6 +3,11 @@
  */
 #include "autonomous_driving_config.hpp"
 #include "perception_node.hpp"
+#include <random>
+#include <set>
+#include <algorithm>
+#include <limits>
+#include <numeric>
 
 using namespace Eigen;
 using namespace std;
@@ -17,6 +22,17 @@ PerceptionNode::PerceptionNode(const std::string &node_name, const rclcpp::NodeO
     this->declare_parameter("autonomous_driving/ns", "");
     this->declare_parameter("autonomous_driving/loop_rate_hz", 100.0);
     this->declare_parameter("autonomous_driving/use_manual_inputs", false);
+
+    // RANSAC Parameters
+    this->declare_parameter("autonomous_driving/ransac_max_iterations", 50);
+    this->declare_parameter("autonomous_driving/ransac_inlier_threshold", 0.15);
+    this->declare_parameter("autonomous_driving/ransac_min_inlier_ratio", 0.9);
+
+    // ROI Parameters
+    this->declare_parameter("autonomous_driving/roi_front", 20.0);
+    this->declare_parameter("autonomous_driving/roi_rear", 10.0);
+    this->declare_parameter("autonomous_driving/roi_left", 3.0);
+    this->declare_parameter("autonomous_driving/roi_right", 3.0);
 
     ProcessParams();
 
@@ -77,16 +93,27 @@ PerceptionNode::PerceptionNode(const std::string &node_name, const rclcpp::NodeO
 PerceptionNode::~PerceptionNode() {}
 
 void PerceptionNode::ProcessParams() {
+    //get parameters : 선언한 파라미터 값을 읽어오기
     this->get_parameter("autonomous_driving/ns", cfg_.vehicle_namespace);
     this->get_parameter("autonomous_driving/loop_rate_hz", cfg_.loop_rate_hz);
     this->get_parameter("autonomous_driving/use_manual_inputs", cfg_.use_manual_inputs);
-    ////////////////////// TODO //////////////////////
+
+    // RANSAC Parameters
+    this->get_parameter("autonomous_driving/ransac_max_iterations", cfg_.ransac_max_iterations);
+    this->get_parameter("autonomous_driving/ransac_inlier_threshold", cfg_.ransac_inlier_threshold);
+    this->get_parameter("autonomous_driving/ransac_min_inlier_ratio", cfg_.ransac_min_inlier_ratio);
+
+    // ROI Parameters
+    this->get_parameter("autonomous_driving/roi_front", cfg_.param_m_ROIFront_param);
+    this->get_parameter("autonomous_driving/roi_rear", cfg_.param_m_ROIRear_param);
+    this->get_parameter("autonomous_driving/roi_left", cfg_.param_m_ROILeft_param);
+    this->get_parameter("autonomous_driving/roi_right", cfg_.param_m_ROIRight_param);
 }
 
 void PerceptionNode::Run() {
     //===================================================
     // Get subscribe variables 
-    //일종의 input데이터 수집 단계 (멤버 변수 -> 지역변수로 복사 (mutex로 보호))
+    // 일종의 input데이터 수집 단계 (멤버 변수 -> 지역변수로 복사 (mutex로 보호))
     //===================================================
     if (cfg_.use_manual_inputs == true) {
         if (b_is_manual_input_ == false) {
@@ -105,13 +132,6 @@ void PerceptionNode::Run() {
         return;
     }
 
-    //if (b_is_mission_ == false) {
-    //    RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Wait for Mission ...");
-    //    return;
-    //}
-
-    // 일종의 input데이터 수집 단계 (멤버 변수 -> 지역변수로 복사 (mutex로 보호))
-
     interface::VehicleCommand manual_input; {
         if (cfg_.use_manual_inputs == true) {
             std::lock_guard<std::mutex> lock(mutex_manual_input_);
@@ -123,164 +143,310 @@ void PerceptionNode::Run() {
         std::lock_guard<std::mutex> lock(mutex_vehicle_state_);
         vehicle_state = i_vehicle_state_;
     }
+
     interface::Lane lane_points; {
         std::lock_guard<std::mutex> lock(mutex_lane_points_);
         lane_points = i_lane_points_;
     }
 
-    //interface::Mission mission; {
-    //    std::lock_guard<std::mutex> lock(mutex_mission_);
-    //    mission = i_mission_;
-    //}
-
     //===================================================
     // Algorithm
     //===================================================
-    interface::PolyfitLanes poly_lanes;
-
-    interface::PolyfitLane driving_way = FindDrivingWay(vehicle_state, lane_points);
-    //if (cfg_.use_manual_inputs == true) {
-    //    vehicle_command = manual_input;
-    //}
+    interface::PolyfitLanes poly_lanes = FindLanes(lane_points);
+    interface::PolyfitLane driving_way = FindDrivingWay(vehicle_state, poly_lanes);
 
     //===================================================
     // Publish output
     //===================================================
-    // (1) vehicle command
-    //p_vehicle_command_->publish(ros2_bridge::UpdateVehicleCommand(vehicle_command));
-    // (2) driving way
+    // driving way
     p_driving_way_->publish(ros2_bridge::UpdatePolyfitLane(driving_way));
-    // (3) polyfit lanes
     p_poly_lanes_->publish(ros2_bridge::UpdatePolyfitLanes(poly_lanes));
+
 }
 
-//===================================================
-// [다훈 수정]FindDrivingWay 함수 구현
-//===================================================
-interface::PolyfitLane PerceptionNode::FindDrivingWay(const interface::VehicleState &vehicle_state, const interface::Lane& lane_points) {
-    
+
+
+
+interface::PolyfitLanes PerceptionNode::FindLanes(const interface::Lane& lane_points) {
+    interface::PolyfitLanes lanes;
+    lanes.frame_id = lane_points.frame_id;
+
+    if (lane_points.point.empty()) {
+        return lanes;
+    }
+
+    constexpr int kLaneCount = 4;
+    const double slice_width = 0.5;  // Δx
+    const int min_points_for_fit = 4;
+    const int kmeans_max_iter = 10;
+
+    double min_x = lane_points.point.front().x;
+    double max_x = lane_points.point.front().x;
+    for (const auto& pt : lane_points.point) {
+        min_x = std::min(min_x, pt.x);
+        max_x = std::max(max_x, pt.x);
+    }
+
+    if (max_x - min_x < slice_width) {
+        max_x = min_x + slice_width;
+    }
+
+    int slice_count = std::max(1, static_cast<int>(std::ceil((max_x - min_x) / slice_width)));
+    std::vector<std::vector<interface::Point2D>> slices(static_cast<size_t>(slice_count));
+    for (const auto& pt : lane_points.point) {
+        int idx = static_cast<int>(std::floor((pt.x - min_x) / slice_width));
+        idx = std::max(0, std::min(idx, slice_count - 1));
+        slices[static_cast<size_t>(idx)].push_back(pt);
+    }
+
+    auto sliceXCenter = [&](int slice_idx, const std::vector<interface::Point2D>& pts) {
+        if (pts.empty()) {
+            return min_x + (slice_idx + 0.5) * slice_width;
+        }
+        double sum = 0.0;
+        for (const auto& p : pts) {
+            sum += p.x;
+        }
+        return sum / pts.size();
+    };
+
+    auto kmeans1D = [&](const std::vector<double>& values) {
+        std::vector<std::pair<double, std::vector<double>>> clusters;
+        if (values.empty()) {
+            return clusters;
+        }
+
+        int k = std::min(kLaneCount, static_cast<int>(values.size()));
+        std::vector<double> centers;
+        std::vector<double> sorted = values;
+        std::sort(sorted.begin(), sorted.end());
+        centers.reserve(k);
+        for (int i = 0; i < k; ++i) {
+            size_t idx = static_cast<size_t>((sorted.size() - 1) * (2 * i + 1) / (2 * k));
+            centers.push_back(sorted[idx]);
+        }
+
+        std::vector<std::vector<double>> grouped(static_cast<size_t>(k));
+        for (int iter = 0; iter < kmeans_max_iter; ++iter) {
+            std::vector<std::vector<double>> new_grouped(static_cast<size_t>(k));
+            for (double v : values) {
+                int nearest = 0;
+                double best = std::abs(v - centers[0]);
+                for (int c = 1; c < k; ++c) {
+                    double dist = std::abs(v - centers[c]);
+                    if (dist < best) {
+                        best = dist;
+                        nearest = c;
+                    }
+                }
+                new_grouped[static_cast<size_t>(nearest)].push_back(v);
+            }
+
+            bool converged = true;
+            for (int c = 0; c < k; ++c) {
+                if (new_grouped[static_cast<size_t>(c)].empty()) {
+                    continue;
+                }
+                double mean = std::accumulate(new_grouped[static_cast<size_t>(c)].begin(), new_grouped[static_cast<size_t>(c)].end(), 0.0) /
+                              new_grouped[static_cast<size_t>(c)].size();
+                if (std::abs(mean - centers[c]) > 1e-3) {
+                    converged = false;
+                }
+                centers[c] = mean;
+            }
+            grouped.swap(new_grouped);
+            if (converged) {
+                break;
+            }
+        }
+
+        clusters.reserve(static_cast<size_t>(k));
+        for (int c = 0; c < k; ++c) {
+            clusters.push_back({centers[c], grouped[static_cast<size_t>(c)]});
+        }
+        std::sort(clusters.begin(), clusters.end(), [](const auto& a, const auto& b) {
+            return a.first < b.first;
+        });
+        return clusters;
+    };
+
+    std::vector<std::vector<Eigen::Vector2d>> lane_centers(kLaneCount);
+    for (size_t slice_idx = 0; slice_idx < slices.size(); ++slice_idx) {
+        if (slices[slice_idx].empty()) {
+            continue;
+        }
+        std::vector<double> ys;
+        ys.reserve(slices[slice_idx].size());
+        for (const auto& pt : slices[slice_idx]) {
+            ys.push_back(pt.y);
+        }
+
+        auto clusters = kmeans1D(ys);
+        double x_center = sliceXCenter(static_cast<int>(slice_idx), slices[slice_idx]);
+
+        int lane_id = 0;
+        for (const auto& cluster : clusters) {
+            if (lane_id >= kLaneCount) {
+                break;
+            }
+            if (cluster.second.empty()) {
+                ++lane_id;
+                continue;
+            }
+            double y_center = std::accumulate(cluster.second.begin(), cluster.second.end(), 0.0) / cluster.second.size();
+            lane_centers[lane_id].push_back(Eigen::Vector2d(x_center, y_center));
+            ++lane_id;
+        }
+    }
+
+    auto solvePolynomial = [](const std::vector<Eigen::Vector2d>& pts) {
+        Eigen::Vector4d coeffs = Eigen::Vector4d::Zero();
+        if (pts.empty()) {
+            return coeffs;
+        }
+        Eigen::MatrixXd X(pts.size(), 4);
+        Eigen::VectorXd Y(pts.size());
+        for (size_t i = 0; i < pts.size(); ++i) {
+            double x = pts[i].x();
+            X(static_cast<int>(i), 0) = 1.0;
+            X(static_cast<int>(i), 1) = x;
+            X(static_cast<int>(i), 2) = x * x;
+            X(static_cast<int>(i), 3) = x * x * x;
+            Y(static_cast<int>(i)) = pts[i].y();
+        }
+        coeffs = X.colPivHouseholderQr().solve(Y);
+        return coeffs;
+    };
+
+    auto fitWithRansac = [&](const std::vector<Eigen::Vector2d>& pts) {
+        if (pts.size() < static_cast<size_t>(min_points_for_fit)) {
+            return solvePolynomial(pts);
+        }
+        std::mt19937 gen(std::random_device{}());
+        Eigen::Vector4d best_coeffs = Eigen::Vector4d::Zero();
+        int best_inliers = 0;
+        std::vector<int> best_inlier_indices;
+
+        std::uniform_int_distribution<> dis(0, static_cast<int>(pts.size()) - 1);
+        for (int iter = 0; iter < cfg_.ransac_max_iterations; ++iter) {
+            std::set<int> sample_indices;
+            while (static_cast<int>(sample_indices.size()) < min_points_for_fit) {
+                sample_indices.insert(dis(gen));
+            }
+
+            Eigen::MatrixXd X_sample(min_points_for_fit, 4);
+            Eigen::VectorXd Y_sample(min_points_for_fit);
+            int idx = 0;
+            for (int sample_idx : sample_indices) {
+                double x = pts[static_cast<size_t>(sample_idx)].x();
+                X_sample(idx, 0) = 1.0;
+                X_sample(idx, 1) = x;
+                X_sample(idx, 2) = x * x;
+                X_sample(idx, 3) = x * x * x;
+                Y_sample(idx) = pts[static_cast<size_t>(sample_idx)].y();
+                ++idx;
+            }
+
+            Eigen::Vector4d coeffs = X_sample.colPivHouseholderQr().solve(Y_sample);
+
+            std::vector<int> inliers;
+            for (size_t i = 0; i < pts.size(); ++i) {
+                double x = pts[i].x();
+                double y_pred = coeffs(0) + coeffs(1) * x + coeffs(2) * x * x + coeffs(3) * x * x * x;
+                double error = std::abs(y_pred - pts[i].y());
+                if (error < cfg_.ransac_inlier_threshold) {
+                    inliers.push_back(static_cast<int>(i));
+                }
+            }
+
+            if (static_cast<int>(inliers.size()) > best_inliers) {
+                best_inliers = static_cast<int>(inliers.size());
+                best_coeffs = coeffs;
+                best_inlier_indices = inliers;
+            }
+
+            if (best_inliers > static_cast<int>(pts.size() * cfg_.ransac_min_inlier_ratio)) {
+                break;
+            }
+        }
+
+        if (best_inliers >= min_points_for_fit && !best_inlier_indices.empty()) {
+            std::vector<Eigen::Vector2d> inlier_points;
+            inlier_points.reserve(best_inlier_indices.size());
+            for (int i : best_inlier_indices) {
+                inlier_points.push_back(pts[static_cast<size_t>(i)]);
+            }
+            return solvePolynomial(inlier_points);
+        }
+
+        return solvePolynomial(pts);
+    };
+
+    for (int lane_id = 0; lane_id < kLaneCount; ++lane_id) {
+        if (lane_centers[lane_id].empty()) {
+            continue;
+        }
+        Eigen::Vector4d coeffs = fitWithRansac(lane_centers[lane_id]);
+        interface::PolyfitLane lane_poly;
+        lane_poly.frame_id = lane_points.frame_id;
+        lane_poly.id = "lane" + std::to_string(lane_id);
+        lane_poly.a0 = coeffs(0);
+        lane_poly.a1 = coeffs(1);
+        lane_poly.a2 = coeffs(2);
+        lane_poly.a3 = coeffs(3);
+        lanes.polyfitlanes.push_back(lane_poly);
+    }
+
+    return lanes;
+}
+
+interface::PolyfitLane PerceptionNode::FindDrivingWay(const interface::VehicleState &vehicle_state, const interface::PolyfitLanes& lanes) {
+    (void)vehicle_state;
     interface::PolyfitLane driving_way;
-    driving_way.frame_id = lane_points.frame_id;
+    driving_way.frame_id = lanes.frame_id;
 
-    /**
-     * @brief Find the driving way from the lane points
-     * inputs: vehicle_state, lane_points
-     * outputs: driving_way_raw
-     * Purpose: Implement lane fitting algorithm to find the driving way (center line) from the given lane points
-     */
+    if (lanes.polyfitlanes.empty()) {
+        return driving_way;
+    }
 
-    ////////////////////// TODO //////////////////////
+    double closest_left_dist = std::numeric_limits<double>::max();
+    double closest_right_dist = std::numeric_limits<double>::max();
+    Eigen::Vector4d left_coeffs = Eigen::Vector4d::Zero();
+    Eigen::Vector4d right_coeffs = Eigen::Vector4d::Zero();
+    bool has_left = false;
+    bool has_right = false;
 
-    /**********   Step 1: Separate lane points into left and right lanes ***********/
-    // (This is a placeholder; actual polynomial fitting code should be implemented here)
-
-    /* --------------------------------------------
-    1-1 Check and initialize the number of points
-    lane_points 구조 파악 (1): point 배열 
-    practice 코드 그대로 
-    -----------------------------------------------*/
-    int num_points = lane_points.point.size(); // point 개수 파악
-
-    /* --------------------------------------------
-    1-2 Count left and right points
-    point 메시지는 ros2표준 geometry_msgs/Point 타입의 배열임 (x,y,z) 
-    좌표축 설정: x: 차량 진행방향, y: 차량 좌우방향(왼쪽이 +), z: 수직방향(위가 +)
-    -----------------------------------------------*/
-    int num_left_points = 0;
-    int num_right_points = 0;
-    for (int i=0; i<num_points; i++) {
-        if (lane_points.point[i].y > 0) { // y>0 이면 왼쪽 차선
-            num_left_points++;
-        } else { // y<=0 이면 오른쪽 차선
-            num_right_points++;
+    for (const auto& lane : lanes.polyfitlanes) {
+        Eigen::Vector4d coeff(lane.a0, lane.a1, lane.a2, lane.a3);
+        double intercept = coeff(0);
+        double dist = std::abs(intercept);
+        if (intercept > 0.0 && dist < closest_left_dist) {
+            closest_left_dist = dist;
+            left_coeffs = coeff;
+            has_left = true;
+        } else if (intercept < 0.0 && dist < closest_right_dist) {
+            closest_right_dist = dist;
+            right_coeffs = coeff;
+            has_right = true;
         }
     }
 
-    /*--------------------------------------------
-    1-3 Initialize X, Y, and A matrices for left and right lanes with correct sizes
-    3차 다항식 fitting을 해야하니까 계수 4개 필요 (a,b,c,d)
-    X행렬: 각 포인트의 x좌표를 다항식 형태로 변환 포인트x4 
-    Y행렬: 각 포인트의 y좌표 포인트x1 
-    Eigen 행렬 사용 
-    typedef matrix<double, Dynamic, Dynamic> MatrixXd; 
-    Vector는 1row or 1column matrix일 때 사용
-    typedef matrix<int, Dynamic, 1> VectorXi;
-    ----------------------------------------------*/
-    //left lane
-    Eigen::MatrixXd X_left(num_left_points, 4); // num_left_points x 4 (각 num_left_points 당 1x4)
-    Eigen::VectorXd Y_left(num_left_points);    // num_left_points x 1 (각 num_left_points 당 1x1)
-    //right lane
-    Eigen::MatrixXd X_right(num_right_points, 4); // num_right_points x 4 (각 num_right_points 당 1x4)
-    Eigen::VectorXd Y_right(num_right_points);    // num_right_points x 1 (각 num_right_points 당 1x1)
-
-
-    /**********   Step 2: Fit a polynomial to each lane's points *******************/
-    // (This is a placeholder; actual polynomial fitting code should be implemented here)
-    /*least squares method 사용해서 y=ax^3 + bx^2 + cx + d 형태로 fitting
-
-    Y = X × A
-
-    Y = | y₁ |    X = | 1  x₁   x₁²  x₁³ |   A = | a |
-        | y₂ |        | 1  x₂   x₂²  x₂³ |       | b |
-        | y₃ |        | 1  x₃   x₃²  x₃³ |       | c |
-        | .. |        | ...  ...  ... .. |       | d |
-
-    A = (Xᵀ × X)⁻¹ × Xᵀ × Y 공식 */
-
-    // [다훈 수정]2-0 X, Y 행렬 채우기
-    int left_index = 0;
-    int right_index = 0;
-    for (int i=0; i<num_points; i++) {
-        double x = lane_points.point[i].x;
-        double y = lane_points.point[i].y;
-        //left lane
-        if (y>0){
-            X_left(left_index, 0) = 1;
-            X_left(left_index, 1) = pow(x, 1);
-            X_left(left_index, 2) = pow(x, 2);
-            X_left(left_index, 3) = pow(x, 3);
-            Y_left(left_index) = y;
-            left_index++;
-        }
-        //right lane
-        else if (y<=0){
-            X_right(right_index, 0) = 1;
-            X_right(right_index, 1) = pow(x, 1);
-            X_right(right_index, 2) = pow(x, 2);
-            X_right(right_index, 3) = pow(x, 3);
-            Y_right(right_index) = y;
-            right_index++;
-        }
+    if (!(has_left && has_right)) {
+        return driving_way;
     }
 
-    // 2-1 Get optimized left lane coefficients A_left
-    Eigen::VectorXd A_left = (X_left.transpose() * X_left).inverse() * X_left.transpose() * Y_left;
+    Eigen::Vector4d center_coeffs = (left_coeffs + right_coeffs) * 0.5;
+    driving_way.id = "driving_way";
+    driving_way.a0 = center_coeffs(0);
+    driving_way.a1 = center_coeffs(1);
+    driving_way.a2 = center_coeffs(2);
+    driving_way.a3 = center_coeffs(3);
+    return driving_way;
+}
 
-    // 2-2 Get optimized right lane coefficients A_right
-    Eigen::VectorXd A_right = (X_right.transpose() * X_right).inverse() * X_right.transpose() * Y_right;
-
-
-    /* Step 3: Determine the driving way as the center line between the left and right lane
-            (This is a placeholder; actual center line calculation code should be implemented here)
-            Update driving_way_raw with calculated center line
-    left lane: y_left = a_L·x³ + b_L·x² + c_L·x + d_L
-    right lane: y_right = a_R·x³ + b_R·x² + c_R·x + d_R
-    center line: y_center = (y_left + y_right) / 2
-    */
-
-    //center line 계수 벡터 생성
-    Eigen::VectorXd A_center(4);
-    //3-1각 계수를 좌/우 평균으로 계산
-    A_center(0) = (A_left(0) + A_right(0)) / 2;
-    A_center(1) = (A_left(1) + A_right(1)) / 2;
-    A_center(2) = (A_left(2) + A_right(2)) / 2;
-    A_center(3) = (A_left(3) + A_right(3)) / 2;
-    //3-2 driving_way_raw 메시지에 계수 저장 (PolyfitLaneData 메시지에 맞게 (a0~a3) 저장)
-    driving_way.a0 = A_center(0);  // 상수항
-    driving_way.a1 = A_center(1);  // x의 계수
-    driving_way.a2 = A_center(2);  // x²의 계수
-    driving_way.a3 = A_center(3);  // x³의 계수
-    ////////////////////////////////////////////////////
+interface::PolyfitLane PerceptionNode::FindDrivingWayNew(const interface::VehicleState &vehicle_state, const interface::Lane& lane_points) {
+    auto lanes = FindLanes(lane_points);
+    auto driving_way = FindDrivingWay(vehicle_state, lanes);
     return driving_way;
 }
 

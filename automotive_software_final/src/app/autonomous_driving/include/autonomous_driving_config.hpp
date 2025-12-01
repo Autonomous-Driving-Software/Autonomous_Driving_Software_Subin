@@ -52,6 +52,11 @@ typedef struct {
     double speed_error_integral{0.0};
     double speed_error_prev{0.0};
 
+    // [수빈 수정 12.1] RANSAC Parameters for Lane Detection
+    int ransac_max_iterations{50};           // RANSAC 최대 반복 횟수
+    double ransac_inlier_threshold{0.15};    // inlier 판정 거리 (m)
+    double ransac_min_inlier_ratio{0.9};     // 조기 종료를 위한 최소 inlier 비율
+
     //////////////////////////////////////////////////
 } AutonomousDrivingConfig;
 
