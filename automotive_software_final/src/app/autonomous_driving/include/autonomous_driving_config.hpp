@@ -21,6 +21,8 @@ typedef struct {
     double loop_rate_hz{100.0};
     bool use_manual_inputs{false};
 
+    ////////////////////// TODO //////////////////////
+    // [다훈 수정 5]TODO: Add more parameters (ex: kd, ki, kv, ...) from autonomous_driving.hpp
     //1. 차량 물리 파라미터
     double param_wheel_base{1.302 + 1.398}; // L_f + L_r
     double param_max_lateral_accel{6200.0 / 1319.91}; // Fyf_max / Mass
@@ -37,19 +39,20 @@ typedef struct {
     double param_brake_ratio{1.2};
 
     //4. ROI 파라미터
-    double param_m_ROIFront_param{20.0};
+    double param_m_ROIFront_param{15.0};
     double param_m_ROIRear_param{10.0};
-    double param_m_ROILeft_param{3.0};
-    double param_m_ROIRight_param{3.0};
+    double param_m_ROILeft_param{8.0};
+    double param_m_ROIRight_param{8.0};
     std::string ref_csv_path{""};
 
-    //5. Control Parameters (for longitudinal control)
+    // [다훈 수정9] Control Parameters (for longitudinal control)
     const double dt{1.0/100.0};
     
-    //6. Algorithm Parameters
+    //Algorithm Parameters
     double speed_error_integral{0.0};
     double speed_error_prev{0.0};
 
+    //////////////////////////////////////////////////
 } AutonomousDrivingConfig;
 
 #endif // __AUTONOMOUS_DRIVING_CONFIG_HPP__

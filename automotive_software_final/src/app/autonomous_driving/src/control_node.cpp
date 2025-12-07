@@ -284,7 +284,7 @@ std::pair<double, double> ControlNode::LongitudinalControl(const interface::Vehi
      * Purpose: Implement PID control to compute acceleration and brake commands to follow the reference speed
      */
     // Initialize Outputs
-    double accel_command = 0.5;
+    double accel_command = 0.0;
     double brake_command = 0.0;
 
     ////////////////////// TODO //////////////////////

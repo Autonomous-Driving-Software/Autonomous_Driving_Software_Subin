@@ -13,7 +13,7 @@
 #include <chrono>
 #include <eigen3/Eigen/Dense> 
 
-// Interface Header
+// Interface Header (ROS 독립적)
 #include "interface_lane.hpp"
 #include "interface_vehicle.hpp" 
 
@@ -34,10 +34,11 @@ class PerceptionNode : public rclcpp::Node {
         void Run();
 
     private:
-        //===============================================
-        // Functions 
-        //===============================================
-        void Init(const rclcpp::Time &current_time); 
+
+        //-- Functions ------------------------------------------------//
+        void Init(const rclcpp::Time &current_time);  // ← 이 줄 추가
+
+        // Callback functions
 
         inline void CallbackVehicleState(const ad_msgs::msg::VehicleState::SharedPtr msg) {            
             std::lock_guard<std::mutex> lock(mutex_vehicle_state_);
@@ -50,57 +51,51 @@ class PerceptionNode : public rclcpp::Node {
             b_is_lane_points_ = true;
         }
 
-        /**
-         * @brief 차선 포인트 데이터를 3차 다항식으로 피팅하여 차선을 검출하는 함수
-         * @param lane_points 차선 포인트 배열
-         * @return 검출된 차선들의 다항식 계수 (a0, a1, a2, a3)
-         */
-        interface::PolyfitLanes FindLanes(const interface::Lane& lane_points);
+        // algorithm
+        interface::PolyfitLanes FindLanes(const interface::VehicleState &vehicle_state, const interface::Lane& lane_points);
+        interface::PolyfitLane FindDrivingWay(const interface::PolyfitLanes& poly_lanes);
 
-        /**
-         * @brief 검출된 차선들의 중앙선을 계산하여 주행 경로를 생성하는 함수
-         * @param vehicle_state 현재 차량 상태
-         * @param lanes 검출된 차선들
-         * @return 주행 경로의 다항식 계수
-         */
-        interface::PolyfitLane FindDrivingWay(const interface::VehicleState &vehicle_state, const interface::PolyfitLanes& lanes);
-        
-        //===============================================
-        // Variables
-        //===============================================
-        interface::VehicleCommand i_manual_input_;
-        interface::VehicleState i_vehicle_state_;
-        interface::Lane i_lane_points_;
-        
-        int ransac_max_iterations;
-        double ransac_inlier_threshold;
-        double ransac_min_inlier_ratio;
+        //-- Variable ------------------------------------------------//
 
-        std::mutex mutex_manual_input_;
-        std::mutex mutex_vehicle_state_;
-        std::mutex mutex_lane_points_;
-        
-        rclcpp::TimerBase::SharedPtr t_run_node_;
-
-        AutonomousDrivingConfig cfg_;
-
-        bool b_is_manual_input_ = false;
-        bool b_is_simulator_on_ = false;
-        bool b_is_lane_points_ = false;
-
-        //===============================================
-        // Subscriber
-        //===============================================
-        rclcpp::Subscription<ad_msgs::msg::VehicleCommand>::SharedPtr s_manual_input_;
+        // Subscriber 
         rclcpp::Subscription<ad_msgs::msg::VehicleState>::SharedPtr s_vehicle_state_;
         rclcpp::Subscription<ad_msgs::msg::LanePointData>::SharedPtr s_lane_points_;
-        
-        //===============================================
+
+        // Input
+        interface::VehicleState i_vehicle_state_;
+        interface::Lane i_lane_points_;
+
+        // Mutex
+        std::mutex mutex_vehicle_state_;
+        std::mutex mutex_lane_points_;
+
+        //-- Output  ----------------------------------------------------//
+
         // Publisher
-        //===============================================
         rclcpp::Publisher<ad_msgs::msg::PolyfitLaneDataArray>::SharedPtr p_poly_lanes_;
         rclcpp::Publisher<ad_msgs::msg::PolyfitLaneData>::SharedPtr p_driving_way_;
 
+        // Previous frame lanes for gating
+        bool has_prev_left_lane_{false};
+        bool has_prev_right_lane_{false};
+        interface::PolyfitLane prev_left_lane_;
+        interface::PolyfitLane prev_right_lane_;
+
+        // Previous driving way for smoothing
+        bool has_prev_driving_way_{false};
+        interface::PolyfitLane prev_driving_way_;
+        double driving_way_smooth_alpha_{0.3}; // exp smoothing gain
+
+        // Timer
+        rclcpp::TimerBase::SharedPtr t_run_node_;
+
+        // Util and Configuration
+        AutonomousDrivingConfig cfg_;
+
+        // Flag
+        bool b_is_simulator_on_ = false;
+        bool b_is_lane_points_ = false;
+  
     };
 
 #endif // __PERCEPTION_NODE_HPP__

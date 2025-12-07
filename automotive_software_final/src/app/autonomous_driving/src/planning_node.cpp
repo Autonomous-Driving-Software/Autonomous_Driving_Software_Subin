@@ -144,11 +144,6 @@ void PlanningNode::Run() {
         std::lock_guard<std::mutex> lock(mutex_vehicle_state_);
         vehicle_state = i_vehicle_state_;
     }
-    //[다훈 수정1] i_limit_speed_ local변수로 복사해서 run에서 사용 
-    //double limit_speed; {
-    //    std::lock_guard<std::mutex> lock(mutex_limit_speed_);
-    //    limit_speed = i_limit_speed_;
-    //}
 
     interface::Lane lane_points; {
         std::lock_guard<std::mutex> lock(mutex_lane_points_);
@@ -178,15 +173,13 @@ void PlanningNode::Run() {
     // (현재는 수정 없이 그대로 전달, 나중에 lane change 로직 추가 예정)
     interface::PolyfitLane driving_way_real = driving_way_raw;  // ← 새로운 변수 생성
     
-    // TODO: 여기에 나중에 lane change, obstacle avoidance 로직 추가
-    // if (need_lane_change) {
-    //     driving_way_real = LaneChange(driving_way_raw, mission, vehicle_state);
-    // }
-
+    //[11.28 다훈 수정] BehaviorPlanning 함수 추가
+    // ctx
+    PlanningNode::BehaviorContext ctx = BehaviorPlanning(vehicle_state, mission);
 
     //[다훈 수정2] limit_speed 인자 추가
     //(3)Add velocity planning algorithm
-    double reference_speed = VelocityPlanning(vehicle_state, lane_points, mission, driving_way_real);
+    double reference_speed = VelocityPlanning(vehicle_state, lane_points, mission, driving_way_real, ctx);
 
     //->이거는 control에서 사용해야할거 같은데 나중에 옮기기 
     //interface::VehicleCommand vehicle_command;
@@ -222,11 +215,97 @@ void PlanningNode::Run() {
 
 }
 
+
+//============================================
+//BehaviorPlanning 함수 구현
+// input: vehicle_state / mission
+// output: BehaviorContext (현재 모드 정보)
+//============================================
+PlanningNode::BehaviorContext PlanningNode::BehaviorPlanning(const interface::VehicleState &vehicle_state, const interface::Mission &mission) {
+    // ctx initialization
+    BehaviorContext ctx;
+    ctx.current_mode = DrivingMode::NORMAL_DRIVING; // 기본 모드 설정
+
+    // 모든 object 돌면서 확인 
+    for (const auto &obj : mission.objects) {
+        //1) Global->Ego Coordinate 변환
+        auto [x_rel, y_rel] = GlobalToEgoCoordinate(vehicle_state, obj.x, obj.y);
+
+        //2) ego 앞쪽(+x) + 같은 lane(좌우 2m)만 고려 
+        if (x_rel <= 0.0 || std::abs(y_rel) > 2.0) {
+            continue; // 뒤쪽이거나 다른 lane에 있는 객체는 무시
+        }
+
+        //3) Dynamic object 중에서 TTC 계산
+        if (obj.object_type == "Dynamic") {
+            ctx.has_dynamic_object = true; // Dynamic Object (앞차) 존재
+            
+            // Dynamic object와 ego 차량의 상대 속도 계산 
+            double v_rel = vehicle_state.velocity - obj.velocity; // 상대 속도
+            if (v_rel > 0) { // 추월 상황 (ego가 더 빠름)
+                // TTC 계산
+                double ttc = x_rel / v_rel; // Time to Collision
+                ctx.ttc_lead = std::min(ctx.ttc_lead, ttc); // 가장 작은 TTC 저장(for문 밖에서 쓸 수가 없어서 이거 진행)
+                // ✅ 로그 추가
+                RCLCPP_INFO(this->get_logger(), 
+                    "[SCC] TTC: %.2f sec, x_rel: %.2f m, v_ego: %.2f m/s, v_lead: %.2f m/s",
+                    ttc, x_rel, vehicle_state.velocity, obj.velocity);
+
+                //double v_target;
+                if (ttc < 3.0) { // TTC가 3초 미만인 경우에만 속도 정보 업데이트
+                    ctx.v_lead = std::min(ctx.v_lead*0.5, obj.velocity); // 가장 가까운 앞차 속도 저장 (velocity planning함수에서 하고 싶었지만 ㅠ obj.velocity때문에 BehaviorPlanning에서 진행)
+                }
+                else if (ttc < 5.0) {
+                    ctx.v_lead = std::min(ctx.v_lead*0.6, obj.velocity);
+                }
+                else if (ttc < 10.0) {
+                    ctx.v_lead = std::min(ctx.v_lead*0.7, obj.velocity);
+                }
+                else if (ttc < 15.0) {
+                    ctx.v_lead = std::min(ctx.v_lead*0.8, obj.velocity);
+                }
+                else {
+                    ctx.v_lead = std::min(ctx.v_lead, obj.velocity);
+                }
+            }
+        }
+
+        //4) Static object 
+        else if (obj.object_type == "Static") {
+            ctx.has_static_object = true; // Static Object (장애물) 존재
+            ctx.dist_static = std::min(ctx.dist_static, x_rel); // 가장 가까운 장애물 거리 저장(x_rel을 for문 밖에서 쓸 수가 없어서 이거 진행)
+        }
+    }
+
+    //===================================
+    //5) 모드 결정 로직 (1순위 static, 2순위 dynamic, 3순위 일반주행)
+    //===================================
+    // lane change 전환 thresholds = static_warn_dist 
+    // scc 전환 thresholds = ttc_threshold
+    const double static_warn_dist = 15.0; // 15m 이내에 static object 있으면 lane change
+    const double ttc_threshold = 15.0; // 15초 이내에 충돌 예상이면 scc
+
+    //모드 결정
+    if (ctx.has_static_object && ctx.dist_static < static_warn_dist) {
+        ctx.current_mode = DrivingMode::LANE_CHANGE;
+    }
+    else if (ctx.has_dynamic_object && ctx.ttc_lead < ttc_threshold) {
+        ctx.current_mode = DrivingMode::SCC;
+    }
+    else {
+        ctx.current_mode = DrivingMode::NORMAL_DRIVING;
+    }
+
+    return ctx;
+    }
+
+//============================================
 // VelocityPlanning 
 // input: vehicle_state / lane_points / limit_speed 
 // output: driving_way / reference_speed(LongitudinalControl로 전달됨)
+//============================================
 //[다훈 수정3] limit_speed 인자 추가
-double PlanningNode::VelocityPlanning(const interface::VehicleState &vehicle_state, const interface::Lane &lane_points, const interface::Mission &mission, const interface::PolyfitLane &driving_way_real) {
+double PlanningNode::VelocityPlanning(const interface::VehicleState &vehicle_state, const interface::Lane &lane_points, const interface::Mission &mission, const interface::PolyfitLane &driving_way_real, const BehaviorContext &ctx) {
     /**
      * @brief Plan the driving way and desired speed along the lane points
      * inputs: vehicle_state, lane_points, limit_speed
@@ -236,9 +315,9 @@ double PlanningNode::VelocityPlanning(const interface::VehicleState &vehicle_sta
     
      //perception_node.cpp에서 구현한 FindDrivingWay 함수 driving_way 사용
 
-    double limit_speed = mission.speed_limit; // mission에서 직접 가져오기
+    double v_ref = mission.speed_limit*0.5; // mission에서 직접 가져오기 (이게 v_lead)
     //=================================================
-    //v_kappa 계산 
+    //1) 곡률 기반 속도 제한 (v_kappa 계산)
     //=================================================
      //(1) PolyfitLaneData에서 a3, a2, a1, a0 가져옴 
     double a3 = driving_way_real.a3;
@@ -254,78 +333,85 @@ double PlanningNode::VelocityPlanning(const interface::VehicleState &vehicle_sta
     double v_kappa;
 
     if(std::abs(kappa) < eps) {
-        v_kappa = limit_speed; // 곡률이 거의 0이면 그냥 목표 속도(limit_speed) 사용
+        v_kappa = v_ref; // 곡률이 거의 0이면 그냥 목표 속도(limit_speed) 사용
     } else {
         v_kappa = std::sqrt(cfg_.param_max_lateral_accel / std::abs(kappa)); // v_kappa = sqrt(a_lat_max / |kappa|)
-        v_kappa = std::min(v_kappa, limit_speed); // 제한 속도 초과하지 않도록
+        v_kappa = std::min(v_kappa, v_ref); // 제한 속도 초과하지 않도록
     }
 
-    //=================================================
-    // A [11.27 다훈 수정]v_lead 계산 (Dynaic Obstacle SCC)
-    //=================================================
-    //A-0변수 초기화 
-    
-    double v_lead = limit_speed; // 앞차 속도, 초기값은 limit_speed
-    bool found_leading_vehicle = false;
+    //기본 속도 
+    double reference_speed = std::min(v_ref, v_kappa);
 
-    // A-1 obstacle (global coordinate) -> ego 기준 coordinate 변환
-    double x_ego = vehicle_state.x;
-    double y_ego = vehicle_state.y;
-    double yaw_ego = vehicle_state.yaw;
-    double min_distance_ahead = 1e6; // 앞쪽 최소 거리 초기화
+    //=================================================
+    // [11.28 다훈 수정] Mode 별 속도 결정
+    //  - NORMAL_DRIVING: v_real 그대로 사용
+    //  - SCC: 앞차 속도 동일
+    //  - LANE_CHANGE: Static object와의 거리 고려해서 감속 및 lane change
+    //=================================================
+    // SCC 모드 
+    if (ctx.current_mode == DrivingMode::SCC && ctx.has_dynamic_object) {
+        //앞차 속도 동일하게
+        reference_speed = std::min(reference_speed, ctx.v_lead);
+    }
+    // LANE_CHANGE 모드
+    if (ctx.current_mode == DrivingMode::LANE_CHANGE && ctx.has_static_object) {
+        // 일단 보류
+    }
+    else {
+        // NORMAL_DRIVING 모드: v_real 그대로 사용
+    }
+
 
     // obstacle 좌표계 global -> ego 변환 및 TTC 계산 (같은 lane에 있는 차량만 고려)
-    for (const auto& obj : mission.objects) {
-        double dx = obj.x - x_ego;
-        double dy = obj.y - y_ego;
-        double cos_yaw = std::cos(yaw_ego);
-        double sin_yaw = std::sin(yaw_ego);
-        double x_rel = cos_yaw * dx + sin_yaw * dy; // ego 앞쪽이 양수
-        double y_rel = -sin_yaw * dx + cos_yaw * dy; // ego 좌측이 양수
+    // for (const auto& obj : mission.objects) {
+    //     //[11.28 다훈 수정] 함수 불러와서 obstacle 좌표계 변환
+    //     auto [x_rel, y_rel] = GlobalToEgoCoordinate(vehicle_state, obj.x, obj.y);
         
-        // [다훈 수정] 같은 lane에 있는 object만 고려 (y_rel이 작고 x_rel이 양수인 경우)
-        if (std::abs(y_rel)<2.0 && x_rel > 0) { // [부등호 < or <= (고민 중)]
-            double v_rel = vehicle_state.velocity - obj.velocity; // 상대 속도
-            if (v_rel > 0) { // 추월 상황 (ego가 더 빠름)
-                double ttc = x_rel / v_rel; // Time to Collision
-                // ttc를 더 잘게 나누어서 진행하자. 
-                if (ttc < 5.0) { // TTC가 임계값 이하인 경우 [cfg_.param_scc_ttc_threshold]
-                    // 이하이면 속도 조정 필요 앞차와의 속도 동일하게 즉, (SCC reference speed = std::min(limit_speed, v_kappa, v_lead))
-                    v_lead = std::min(v_lead, obj.velocity);
-                    found_leading_vehicle = true;
-                }
-            }
-        }
-    }
+    //     if (obj.object_type == "Dynamic") {
+    //         //
+    //         // [11.27 다훈 수정] 같은 lane에 있는 object만 고려 (y_rel이 작고 x_rel이 양수인 경우)
+    //         if (std::abs(y_rel)<2.0 && x_rel > 0) { // [부등호 < or <= (고민 중)]
+    //             double v_rel = vehicle_state.velocity - obj.velocity; // 상대 속도
+    //             if (v_rel > 0) { // 추월 상황 (ego가 더 빠름)
+    //                 double ttc = x_rel / v_rel; // Time to Collision
+    //                 // ttc를 더 잘게 나누어서 진행하자. 
+    //                 if (ttc < 5.0) { // TTC가 임계값 이하인 경우 [cfg_.param_scc_ttc_threshold]
+    //                     // 이하이면 속도 조정 필요 앞차와의 속도 동일하게 즉, (SCC reference speed = std::min(limit_speed, v_kappa, v_lead))
+    //                     v_lead = std::min(v_lead, obj.velocity);
+    //                     found_leading_vehicle = true;
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
     //A-2 TTC 계산 (같은 lane에 있는 차량만 고려)
-    double reference_speed;
-    if (found_leading_vehicle) {
-        reference_speed = std::min({limit_speed, v_kappa, v_lead});
-    } else {
-        reference_speed = std::min(limit_speed, v_kappa);
-    }
-    //(4) 최종 목표 속도 설정 (limit_speed와 v_kappa 중 더 작은 값)
-    //double reference_speed = std::min(limit_speed, v_kappa);
+    // double reference_speed;
+    // if (found_leading_vehicle) {
+    //     reference_speed = std::min({limit_speed, v_kappa, v_lead});
+    // } else {
+    //     reference_speed = std::min(limit_speed, v_kappa);
+    // }
+    // //(4) 최종 목표 속도 설정 (limit_speed와 v_kappa 중 더 작은 값)
+    // //double reference_speed = std::min(limit_speed, v_kappa);
 
     return reference_speed;
 }
 
 // GlobalToEgoCoordinate 함수 구현 (일단 보류) 따로 뺄까 그냥 velocity_planning에 넣을까?
-//void GlobalToEgoCoordinate(const interface::VehicleState &vehicle_state, const interface::Mission &mission) {
-//    // A-1 obstacle (global coordinate) -> ego 기준 coordinate 변환
-//    double x_ego = vehicle_state.x;
-//    double y_ego = vehicle_state.y;
-//    double yaw_ego = vehicle_state.yaw; 
-//    for (const auto& obj : mission.objects) {
-//        double dx = obj.x - x_ego;
-//        double dy = obj.y - y_ego;
-//        double cos_yaw = std::cos(yaw_ego);
-//        double sin_yaw = std::sin(yaw_ego);
-//        double x_rel = cos_yaw * dx + sin_yaw * dy; // ego 앞쪽이 양수
-//        double y_rel = -sin_yaw * dx + cos_yaw * dy; // ego 좌측이 양수
-//    }
-//}
+std::pair<double, double> PlanningNode::GlobalToEgoCoordinate(const interface::VehicleState &vehicle_state, double obj_x_global, double obj_y_global) {
+    // A-1 obstacle (global coordinate) -> ego 기준 coordinate 변환
+    double dx = obj_x_global - vehicle_state.x;
+    double dy = obj_y_global - vehicle_state.y;
+    double cos_yaw = std::cos(vehicle_state.yaw);
+    double sin_yaw = std::sin(vehicle_state.yaw);
+    double x_rel = cos_yaw * dx + sin_yaw * dy;
+    double y_rel = -sin_yaw * dx + cos_yaw * dy;
 
+    return std::make_pair(x_rel, y_rel);
+}
+
+// TTC 함수 밖으로 빼기 
+// LaneChange 함수 추가 (나중에 구현)
 
 int main(int argc, char **argv) {
     std::string node_name = "planning_node";

@@ -9,6 +9,11 @@
   <license>TODO</license>
       
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>boost</depend>
   <depend>rclcpp</depend>
   <depend>ad_msgs</depend>
   <depend>tf2_geometry_msgs</depend>
